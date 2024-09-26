@@ -1,0 +1,102 @@
+{
+  "id": "2e6163ba-7f54-4287-a35e-41ebab1bd49e",
+  "title": "Tags & MZ Checks",
+  "tasks": {
+    "send_email_1": {
+      "name": "send_email_1",
+      "action": "dynatrace.email:send-email",
+      "description": "Send email",
+      "input": {
+        "cc": [
+          "pavan_kottu@optum.com"
+        ],
+        "to": [
+          "pavan_chaurasia@optum.com",
+          "colin_colehour@optum.com",
+          "gaurav_kumarjain@optum.com",
+          "praveen.kumar12@optum.com",
+          "brian_lally@optum.com",
+          "shivam_mishra20@optum.com",
+          "rudra_pal@optum.com",
+          "alicia_pepper@optum.com",
+          "shaiju475@optum.com",
+          "saurabh_thakur@optum.com"
+        ],
+        "bcc": [],
+        "taskId": "{{ task().id }}",
+        "content": "Hi Team,\n\nHere is the count of untagged Hosts, Services and Process Groups:\n\nUntagged:\nHosts: {{ result(\"fetch_entites\")[\"HOST\"][\"Untagged\"] }}\nServices: {{ result(\"fetch_entites\")[\"SERVICE\"][\"Untagged\"] }}\nProcess Groups: {{ result(\"fetch_entites\")[\"PROCESS_GROUP\"][\"Untagged\"] }}\n\nTagged_as_unknown:\nHosts: {{ result(\"fetch_entites\")[\"HOST\"][\"Tagged_as_Unknown\"] }}\nServices: {{ result(\"fetch_entites\")[\"SERVICE\"][\"Tagged_as_Unknown\"] }}\nProcess Groups: {{ result(\"fetch_entites\")[\"PROCESS_GROUP\"][\"Tagged_as_Unknown\"] }}\n\nTagged without Management Zone:\nHosts: {{ result(\"fetch_entites\")[\"HOST\"][\"Tagged_Without_MZ\"] }}\nServices: {{ result(\"fetch_entites\")[\"SERVICE\"][\"Tagged_Without_MZ\"] }}\nProcess Groups: {{ result(\"fetch_entites\")[\"PROCESS_GROUP\"][\"Tagged_Without_MZ\"] }}\n\nFor more details visit: \nhttps://dfr17824.apps.dynatrace.com/ui/document/v0/#share=a8e1eb78-d434-431e-90aa-3954ece53d09\n",
+        "subject": "Non-Prod Tags and Mannagement Zone checks",
+        "executionId": "{{ execution().id }}",
+        "environmentUrl": "https://dfr17824.apps.dynatrace.com"
+      },
+      "active": true,
+      "position": {
+        "x": 0,
+        "y": 2
+      },
+      "predecessors": [
+        "fetch_entites"
+      ],
+      "conditions": {
+        "states": {
+          "fetch_entites": "OK"
+        },
+        "custom": ""
+      }
+    },
+    "fetch_entites": {
+      "name": "fetch_entites",
+      "action": "dynatrace.automations:run-javascript",
+      "description": "Build a custom task running js Code",
+      "input": {
+        "script": "/*\n * This function will run in the DYNATRACE JavaScript runtime.\n * For information, visit https://dt-url.net/functions-help\n */\nimport { monitoredEntitiesClient } from \"@dynatrace-sdk/client-classic-environment-v2\";\n\n// Fetch entities by type\nasync function fetchEntitiesByType(entityType) {\n  try {\n    const baseConfig = {\n      entitySelector: `type(\"${entityType}\")`,\n      pageSize: 500,\n      resolution: \"Inf\",\n      from: \"now-1h\",  // Time range is set to the last hour\n      fields: \"tags,managementZones,lastSeenTms,firstSeenTms\"\n    };\n\n    let entities = [];\n    let nextPageKey = null;\n\n    do {\n      const config = nextPageKey ? { nextPageKey } : baseConfig;\n      const response = await monitoredEntitiesClient.getEntities(config);\n      //console.log(\"Fetched response for type\", entityType, \":\", response);\n      if (response.entities) {\n        entities = entities.concat(response.entities);\n      }\n      nextPageKey = response.nextPageKey;\n    } while (nextPageKey);\n\n    return entities;\n  } catch (error) {\n    console.error(`Error fetching entities of type ${entityType}:`, error);\n    return [];\n  }\n}\n\n// Fetch all entities by types\nasync function fetchEntities(entityTypes) {\n  try {\n    let allEntities = [];\n    for (const type of entityTypes) {\n      const entities = await fetchEntitiesByType(type);\n      allEntities = allEntities.concat(entities);\n    }\n\n    // Log the full payload for reference\n    //console.log(\"Fetched Entities Payload:\", allEntities);\n\n    return allEntities;\n  } catch (error) {\n    console.error(\"Error fetching entities:\", error);\n    return [];\n  }\n}\n\n// Validate entities and create lists with issues\nasync function validateEntities(allEntities) {\n  const entitiesWithIssues = {\n    \"HOST\": { \"Untagged\": 0,\"Tagged_as_Unknown\": 0, \"Tagged_Without_MZ\": 0 },\n    \"SERVICE\": { \"Untagged\": 0,\"Tagged_as_Unknown\": 0, \"Tagged_Without_MZ\": 0 },\n    \"PROCESS_GROUP\": { \"Untagged\": 0,\"Tagged_as_Unknown\": 0, \"Tagged_Without_MZ\": 0 }\n  };\n\n  allEntities.forEach(entity => {\n    const askidTag = entity.tags.find(tag => tag.key === \"Askid\");\n    let issue = null;\n\n    if (!askidTag) {\n      issue = 'Untagged';  // Entities are marked as 'untagged' if they don't have an 'Askid' tag or if the 'Askid' tag value is 'unknown'\n    }\n    else if(askidTag.value === \"UNKNOWN\"){\n      issue = 'Tagged_as_Unknown'\n    }\n    else {\n      const askidValue = askidTag.value;\n      const hasExpectedManagementZone = entity.managementZones.some(zone => {\n        const zoneParts = zone.name.split('.');\n        return zoneParts.length === 2 && zoneParts[1] === askidValue;\n      });\n\n      if (!hasExpectedManagementZone) {\n        issue = 'Tagged_Without_MZ';\n      }\n    }\n\n    if (issue) {\n      entitiesWithIssues[entity.type][issue] += 1;\n    }\n  });\n\n  console.log(\"Entities with Issues:\", entitiesWithIssues);\n\n  return entitiesWithIssues;\n}\n\n// Main function\nexport default async function main() {\n  // Define the entity types you want to fetch\n  const entityTypes = [\"HOST\", \"SERVICE\", \"PROCESS_GROUP\"];\n  \n  // Fetch and validate entities\n  const allEntities = await fetchEntities(entityTypes);\n  const entitiesWithIssues = await validateEntities(allEntities);\n\n  // Log the count of entities with issues for each entity type\n  console.log(\"Count of Entities with Issues:\", entitiesWithIssues);\n  return entitiesWithIssues;\n}"
+      },
+      "active": true,
+      "position": {
+        "x": 0,
+        "y": 1
+      },
+      "customSampleResult": {
+        "HOST": {
+          "Untagged": 0,
+          "Tagged_Without_MZ": 7,
+          "Tagged_as_Unknown": 0
+        },
+        "SERVICE": {
+          "Untagged": 0,
+          "Tagged_Without_MZ": 7,
+          "Tagged_as_Unknown": 0
+        },
+        "PROCESS_GROUP": {
+          "Untagged": 0,
+          "Tagged_Without_MZ": 7,
+          "Tagged_as_Unknown": 0
+        }
+      },
+      "predecessors": []
+    }
+  },
+  "description": "",
+  "actor": "a97d575a-ba6e-4324-a2c9-fc76dd1fa72f",
+  "owner": "a97d575a-ba6e-4324-a2c9-fc76dd1fa72f",
+  "ownerType": "USER",
+  "isPrivate": false,
+  "trigger": {
+    "schedule": {
+      "isActive": true,
+      "isFaulty": false,
+      "trigger": {
+        "time": "08:00",
+        "type": "time"
+      },
+      "rule": null,
+      "filterParameters": {
+        "earliestStart": "2024-06-23"
+      },
+      "timezone": "America/New_York",
+      "inputs": {},
+      "nextExecution": "2024-09-27T12:00:00.000Z"
+    }
+  },
+  "schemaVersion": 3
+}

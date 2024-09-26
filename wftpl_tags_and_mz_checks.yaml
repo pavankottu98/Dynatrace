@@ -1,0 +1,244 @@
+metadata:
+  version: "1"
+  dependencies:
+    apps:
+      - id: dynatrace.automations
+        version: ^1.840.5
+      - id: dynatrace.email
+        version: ^0.2.9
+  inputs: []
+workflow:
+  title: Tags & MZ Checks
+  tasks:
+    send_email_1:
+      name: send_email_1
+      description: Send email
+      action: dynatrace.email:send-email
+      active: true
+      input:
+        cc:
+          - pavan_kottu@optum.com
+        to:
+          - pavan_chaurasia@optum.com
+          - colin_colehour@optum.com
+          - gaurav_kumarjain@optum.com
+          - praveen.kumar12@optum.com
+          - brian_lally@optum.com
+          - shivam_mishra20@optum.com
+          - rudra_pal@optum.com
+          - alicia_pepper@optum.com
+          - shaiju475@optum.com
+          - saurabh_thakur@optum.com
+        bcc: []
+        taskId: "{{ task().id }}"
+        content: >
+          Hi Team,
+
+
+          Here is the count of untagged Hosts, Services and Process Groups:
+
+
+          Untagged:
+
+          Hosts: {{ result("fetch_entites")["HOST"]["Untagged"] }}
+
+          Services: {{ result("fetch_entites")["SERVICE"]["Untagged"] }}
+
+          Process Groups: {{
+          result("fetch_entites")["PROCESS_GROUP"]["Untagged"] }}
+
+
+          Tagged_as_unknown:
+
+          Hosts: {{ result("fetch_entites")["HOST"]["Tagged_as_Unknown"] }}
+
+          Services: {{ result("fetch_entites")["SERVICE"]["Tagged_as_Unknown"]
+          }}
+
+          Process Groups: {{
+          result("fetch_entites")["PROCESS_GROUP"]["Tagged_as_Unknown"] }}
+
+
+          Tagged without Management Zone:
+
+          Hosts: {{ result("fetch_entites")["HOST"]["Tagged_Without_MZ"] }}
+
+          Services: {{ result("fetch_entites")["SERVICE"]["Tagged_Without_MZ"]
+          }}
+
+          Process Groups: {{
+          result("fetch_entites")["PROCESS_GROUP"]["Tagged_Without_MZ"] }}
+
+
+          For more details visit: 
+
+          https://dfr17824.apps.dynatrace.com/ui/document/v0/#share=a8e1eb78-d434-431e-90aa-3954ece53d09
+        subject: Non-Prod Tags and Mannagement Zone checks
+        executionId: "{{ execution().id }}"
+        environmentUrl: https://dfr17824.apps.dynatrace.com
+      position:
+        x: 0
+        y: 2
+      predecessors:
+        - fetch_entites
+      conditions:
+        states:
+          fetch_entites: OK
+        custom: ""
+    fetch_entites:
+      name: fetch_entites
+      description: Build a custom task running js Code
+      action: dynatrace.automations:run-javascript
+      active: true
+      input:
+        script: >-
+          /*
+           * This function will run in the DYNATRACE JavaScript runtime.
+           * For information, visit https://dt-url.net/functions-help
+           */
+          import { monitoredEntitiesClient } from
+          "@dynatrace-sdk/client-classic-environment-v2";
+
+
+          // Fetch entities by type
+
+          async function fetchEntitiesByType(entityType) {
+            try {
+              const baseConfig = {
+                entitySelector: `type("${entityType}")`,
+                pageSize: 500,
+                resolution: "Inf",
+                from: "now-1h",  // Time range is set to the last hour
+                fields: "tags,managementZones,lastSeenTms,firstSeenTms"
+              };
+
+              let entities = [];
+              let nextPageKey = null;
+
+              do {
+                const config = nextPageKey ? { nextPageKey } : baseConfig;
+                const response = await monitoredEntitiesClient.getEntities(config);
+                //console.log("Fetched response for type", entityType, ":", response);
+                if (response.entities) {
+                  entities = entities.concat(response.entities);
+                }
+                nextPageKey = response.nextPageKey;
+              } while (nextPageKey);
+
+              return entities;
+            } catch (error) {
+              console.error(`Error fetching entities of type ${entityType}:`, error);
+              return [];
+            }
+          }
+
+
+          // Fetch all entities by types
+
+          async function fetchEntities(entityTypes) {
+            try {
+              let allEntities = [];
+              for (const type of entityTypes) {
+                const entities = await fetchEntitiesByType(type);
+                allEntities = allEntities.concat(entities);
+              }
+
+              // Log the full payload for reference
+              //console.log("Fetched Entities Payload:", allEntities);
+
+              return allEntities;
+            } catch (error) {
+              console.error("Error fetching entities:", error);
+              return [];
+            }
+          }
+
+
+          // Validate entities and create lists with issues
+
+          async function validateEntities(allEntities) {
+            const entitiesWithIssues = {
+              "HOST": { "Untagged": 0,"Tagged_as_Unknown": 0, "Tagged_Without_MZ": 0 },
+              "SERVICE": { "Untagged": 0,"Tagged_as_Unknown": 0, "Tagged_Without_MZ": 0 },
+              "PROCESS_GROUP": { "Untagged": 0,"Tagged_as_Unknown": 0, "Tagged_Without_MZ": 0 }
+            };
+
+            allEntities.forEach(entity => {
+              const askidTag = entity.tags.find(tag => tag.key === "Askid");
+              let issue = null;
+
+              if (!askidTag) {
+                issue = 'Untagged';  // Entities are marked as 'untagged' if they don't have an 'Askid' tag or if the 'Askid' tag value is 'unknown'
+              }
+              else if(askidTag.value === "UNKNOWN"){
+                issue = 'Tagged_as_Unknown'
+              }
+              else {
+                const askidValue = askidTag.value;
+                const hasExpectedManagementZone = entity.managementZones.some(zone => {
+                  const zoneParts = zone.name.split('.');
+                  return zoneParts.length === 2 && zoneParts[1] === askidValue;
+                });
+
+                if (!hasExpectedManagementZone) {
+                  issue = 'Tagged_Without_MZ';
+                }
+              }
+
+              if (issue) {
+                entitiesWithIssues[entity.type][issue] += 1;
+              }
+            });
+
+            console.log("Entities with Issues:", entitiesWithIssues);
+
+            return entitiesWithIssues;
+          }
+
+
+          // Main function
+
+          export default async function main() {
+            // Define the entity types you want to fetch
+            const entityTypes = ["HOST", "SERVICE", "PROCESS_GROUP"];
+            
+            // Fetch and validate entities
+            const allEntities = await fetchEntities(entityTypes);
+            const entitiesWithIssues = await validateEntities(allEntities);
+
+            // Log the count of entities with issues for each entity type
+            console.log("Count of Entities with Issues:", entitiesWithIssues);
+            return entitiesWithIssues;
+          }
+      customSampleResult:
+        HOST:
+          Untagged: 0
+          Tagged_Without_MZ: 7
+          Tagged_as_Unknown: 0
+        SERVICE:
+          Untagged: 0
+          Tagged_Without_MZ: 7
+          Tagged_as_Unknown: 0
+        PROCESS_GROUP:
+          Untagged: 0
+          Tagged_Without_MZ: 7
+          Tagged_as_Unknown: 0
+      position:
+        x: 0
+        y: 1
+      predecessors: []
+  description: ""
+  trigger:
+    schedule:
+      rule: null
+      trigger:
+        type: time
+        time: 08:00
+      timezone: America/New_York
+      isActive: true
+      isFaulty: false
+      nextExecution: 2024-09-27T12:00:00.000Z
+      filterParameters:
+        earliestStart: 2024-06-23
+      inputs: {}
+  schemaVersion: 3
